@@ -30,9 +30,10 @@ if exist EXPMonitor.spec del /q EXPMonitor.spec
 
 echo.
 echo ============================================
-echo   Done!  ->  dist\EXPMonitor\EXPMonitor.exe
+echo   Done. Output folder is  dist\EXPMonitor\
+echo   Run the app:  dist\EXPMonitor\EXPMonitor.exe
 echo ============================================
-echo   templates\ and the recognition core are bundled inside.
+echo   templates and recognition core are bundled inside.
 echo   (Optional) Tesseract fallback: install Tesseract-OCR and add to PATH.
 echo.
 pause
