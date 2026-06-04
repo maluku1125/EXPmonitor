@@ -208,7 +208,8 @@ class TemplateOCR:
         ry0, ry1 = max(groups, key=lambda g: g[1] - g[0])
         return tb[max(0, ry0 - 3):ry1 + 4, :]
 
-    def recognize(self, mask: np.ndarray, debug: bool = False) -> dict:
+    def recognize(self, mask: np.ndarray, debug: bool = False,
+                  expected_digits: int = 0) -> dict:
         """
         輸入：乾淨白字黑底遮罩（build_mask 的輸出）。
         回傳 dict：exp / pct / conf / ok，debug=True 時另含 reason 與中間量。
@@ -263,12 +264,24 @@ class TemplateOCR:
         out["lb_idx"] = lb_idx
 
         confs = []
-        exp = ""
+        digit_glyphs = []   # [(char, conf), ...] EXP 區的數字（不含逗號）
         for a, b in runs[:lb_idx]:
             ch, sc = self._match(mask[:, a:b + 1], DIGITS + [','])
             confs.append(sc)
             if ch and ch != ',':
-                exp += ch
+                digit_glyphs.append((ch, sc))
+
+        chars = [c for c, _ in digit_glyphs]
+        # 已知位數輔助：填充條邊界常被誤判成多餘的 "1"
+        if expected_digits and len(chars) == expected_digits + 1:
+            ones = [i for i, (c, _) in enumerate(digit_glyphs) if c == '1']
+            if ones:
+                drop = min(ones, key=lambda i: digit_glyphs[i][1])  # 信心最低的 "1" = 假影
+                del chars[drop]
+        exp = "".join(chars)
+        # 強制位數：設定後長度不符的幀直接視為不可信（交給時間層維持上一個值）
+        if expected_digits and len(exp) != expected_digits:
+            exp = ""
 
         pct_runs = runs[lb_idx + 1:pct_idx]
         pct = self._parse_pct(mask, pct_runs, confs)
@@ -310,9 +323,9 @@ class TemplateOCR:
             pass
         return None
 
-    def recognize_row(self, exp_row_bgr: np.ndarray) -> dict:
+    def recognize_row(self, exp_row_bgr: np.ndarray, expected_digits: int = 0) -> dict:
         """便利方法：直接吃裁切好的 EXP 文字行（BGR）。"""
-        return self.recognize(build_mask(exp_row_bgr))
+        return self.recognize(build_mask(exp_row_bgr), expected_digits=expected_digits)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

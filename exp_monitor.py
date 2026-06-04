@@ -639,7 +639,7 @@ def run_debug():
 # 正常監控
 # ──────────────────────────────────────────────
 
-def run_monitor(interval):
+def run_monitor(interval, exp_digits=0):
     print("=" * 55)
     print("  MapleStory EXP Monitor  v5.1")
     print(f"  間隔={interval}s  Ctrl+C 停止")
@@ -685,7 +685,7 @@ def run_monitor(interval):
 
             best_e, best_p = None, None
             if ocr is not None:
-                r = ocr.recognize_row(band)
+                r = ocr.recognize_row(band, expected_digits=exp_digits)
                 t = tracker.update(r["exp"], r["pct"])
                 if t["exp"] is not None:
                     best_e = f"{t['exp']:,}"
@@ -724,8 +724,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=float, default=MONITOR_INTERVAL)
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--exp-digits", type=int, default=0,
+                    help="已知 EXP 位數（0=自動）；用來剔除填充邊界誤判的多餘數字")
     args = ap.parse_args()
     if args.debug:
         run_debug()
     else:
-        run_monitor(args.interval)
+        run_monitor(args.interval, args.exp_digits)

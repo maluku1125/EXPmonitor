@@ -359,7 +359,7 @@ class MonitorWorker(QObject):
         row       = text_band[:, x0:x1]
         best_e, best_p = None, None
         if self._ocr is not None:
-            r = self._ocr.recognize_row(text_band)
+            r = self._ocr.recognize_row(text_band, expected_digits=self.cfg.get("exp_digits", 0))
             if r["exp"]:
                 best_e = f"{int(r['exp']):,}"
             if r["pct"]:
@@ -503,6 +503,20 @@ class SettingsPanel(QFrame):
         thr_row.addWidget(_lbl("% 最大經驗 視為誤報門檻", C["gray"], 12))
         thr_row.addStretch()
         lay.addLayout(thr_row)
+
+        # ── 經驗位數（輔助辨識）────────────────────────────────────────────
+        dig_row = QHBoxLayout()
+        dig_row.setSpacing(8)
+        dig_row.addWidget(_lbl("經驗位數", C["gray"], 11))
+        self._expdig = QSpinBox()
+        self._expdig.setRange(0, 20)
+        self._expdig.setValue(cfg.get("exp_digits", 0))
+        self._expdig.setFixedWidth(90)
+        self._expdig.valueChanged.connect(lambda v: cfg.update({"exp_digits": v}))
+        dig_row.addWidget(self._expdig)
+        dig_row.addWidget(_lbl("位（0=自動）；剔除填充邊界誤判的多餘數字", C["gray"], 12))
+        dig_row.addStretch()
+        lay.addLayout(dig_row)
 
         lay.addWidget(_sep())
 
