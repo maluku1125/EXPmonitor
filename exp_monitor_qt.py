@@ -5,7 +5,7 @@ pip install PyQt5 pyqtgraph numpy
 python exp_monitor_qt.py
 """
 
-import os, sys, time
+import os, sys, time, subprocess
 from collections import deque
 from datetime import datetime
 
@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QDoubleSpinBox, QTextEdit,
     QButtonGroup, QRadioButton, QLineEdit, QFrame,
-    QCheckBox, QScrollArea, QProgressBar, QSizePolicy, QSpinBox,
+    QCheckBox, QScrollArea, QProgressBar, QSizePolicy, QSpinBox, QMessageBox, QFileDialog,
 )
 from PyQt5.QtCore import Qt, QThread, QObject, pyqtSignal, pyqtSlot, QTimer
 from PyQt5.QtGui import QColor, QTextCursor, QFont
@@ -453,6 +453,7 @@ class StatTile(QFrame):
 # ══════════════════════════════════════════════════════════════════════════════
 class SettingsPanel(QFrame):
     vis_changed = pyqtSignal()
+    slack_test  = pyqtSignal()
 
     def __init__(self, cfg: dict, vis: dict, parent=None):
         super().__init__(parent)
@@ -556,6 +557,37 @@ class SettingsPanel(QFrame):
         cmax_row.addStretch()
         lay.addLayout(cmax_row)
 
+        lay.addWidget(_sep())
+        lay.addWidget(_lbl("偷懶偵測動作", C["gray"], 11))
+
+        smsg_row = QHBoxLayout(); smsg_row.setSpacing(8)
+        smsg_row.addWidget(_lbl("警告文字", C["gray"], 12))
+        self._slack_msg = QLineEdit(cfg.get("slack_msg", "！偷懶警告！EXP 已 {sec} 秒沒有增加"))
+        self._slack_msg.setPlaceholderText("可用 {sec} {exp} {pct} 代入數值")
+        self._slack_msg.textChanged.connect(lambda t: cfg.update({"slack_msg": t}))
+        smsg_row.addWidget(self._slack_msg)
+        lay.addLayout(smsg_row)
+
+        scmd_row = QHBoxLayout(); scmd_row.setSpacing(8)
+        scmd_row.addWidget(_lbl("觸發腳本", C["gray"], 12))
+        self._slack_cmd = QLineEdit(cfg.get("slack_cmd", ""))
+        self._slack_cmd.setPlaceholderText("例：python hook.py（留空=只跳視窗，不執行）")
+        self._slack_cmd.textChanged.connect(lambda t: cfg.update({"slack_cmd": t}))
+        scmd_row.addWidget(self._slack_cmd)
+        _bb = QPushButton("瀏覽"); _bb.setFixedWidth(56)
+        _bb.clicked.connect(self._slack_browse_setting); scmd_row.addWidget(_bb)
+        _bt = QPushButton("測試"); _bt.setFixedWidth(56)
+        _bt.clicked.connect(self.slack_test.emit); scmd_row.addWidget(_bt)
+        lay.addLayout(scmd_row)
+
+    def _slack_browse_setting(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "選擇觸發腳本", "",
+            "可執行檔 (*.py *.bat *.cmd *.exe);;所有檔案 (*.*)")
+        if path:
+            cmd = f'python "{path}"' if path.lower().endswith(".py") else f'"{path}"'
+            self._slack_cmd.setText(cmd)
+
     def _on_vis(self, key: str, val: bool):
         self._vis[key] = val
         self.vis_changed.emit()
@@ -589,7 +621,8 @@ class MainWindow(QMainWindow):
         self.setMinimumHeight(480)
         self.setStyleSheet(QSS)
 
-        self._cfg: dict = {"interval": 1, "threshold": 1.0, "chart_max": 28800}
+        self._cfg: dict = {"interval": 1, "threshold": 1.0, "chart_max": 28800,
+                           "slack_msg": "！偷懶警告！EXP 已 {sec} 秒沒有增加", "slack_cmd": ""}
         self._vis: dict = {"stats": True, "ttl": True,
                            "chart_pct": True, "chart_eps": True, "log": True}
         self._thread: QThread | None = None
@@ -600,6 +633,11 @@ class MainWindow(QMainWindow):
         self._prev_exp_int: int   | None = None
         self._exp_fail_streak: int = 0
         self._max_exp_est:  float | None = None   # 每等最大EXP估計（由 exp÷pct 推算）
+        # 偷懶偵測狀態
+        self._slack_last_exp: int | None = None
+        self._slack_streak = 0
+        self._slack_t0: float | None = None
+        self._slack_triggered = False
 
         pg.setConfigOptions(antialias=True)
         self._build_ui()
@@ -667,6 +705,7 @@ class MainWindow(QMainWindow):
         self._settings = SettingsPanel(self._cfg, self._vis)
         self._settings.setVisible(False)
         self._settings.vis_changed.connect(self._apply_vis)
+        self._settings.slack_test.connect(self._slack_test)
         self._body_lay.addWidget(self._settings)
 
         # ─── EXP display card ─────────────────────────────────────────────
@@ -738,6 +777,40 @@ class MainWindow(QMainWindow):
         self._ttl_widget = StatTile("⏱  預計升等時間", "依 %/hr 計算", 44)
         self._ttl_widget.setMinimumHeight(105)
         self._body_lay.addWidget(self._ttl_widget)
+
+        # ─── 偷懶偵測 card ─────────────────────────────────────────────────
+        self._slack_card, slack_lay = _card(16, 14)
+        sh = QHBoxLayout()
+        sh.addWidget(_lbl("😴  偷懶偵測", C["white"], 13, bold=True))
+        sh.addStretch()
+        self._slack_enable = QCheckBox("啟用")
+        self._slack_enable.setChecked(False)
+        sh.addWidget(self._slack_enable)
+        slack_lay.addLayout(sh)
+
+        scond = QHBoxLayout()
+        scond.setSpacing(8)
+        scond.addWidget(_lbl("連續", C["gray"], 12))
+        self._slack_secs = QSpinBox()
+        self._slack_secs.setRange(5, 3600)
+        self._slack_secs.setValue(60)
+        self._slack_secs.setFixedWidth(80)
+        scond.addWidget(self._slack_secs)
+        scond.addWidget(_lbl("秒　且　連續", C["gray"], 12))
+        self._slack_count = QSpinBox()
+        self._slack_count.setRange(2, 100)
+        self._slack_count.setValue(3)
+        self._slack_count.setFixedWidth(70)
+        scond.addWidget(self._slack_count)
+        scond.addWidget(_lbl("筆 EXP 不變 → 警告", C["gray"], 12))
+        scond.addStretch()
+        slack_lay.addLayout(scond)
+
+        hint = _lbl("（警告文字與觸發腳本在 ⚙ 設定中）", C["gray"], 10)
+        slack_lay.addWidget(hint)
+        self._slack_status = _lbl("未啟用", C["gray"], 12, mono=True)
+        slack_lay.addWidget(self._slack_status)
+        self._body_lay.addWidget(self._slack_card)
 
         # ─── Chart ────────────────────────────────────────────────────────
         ax_pen = pg.mkPen(C["gray"])
@@ -842,11 +915,106 @@ class MainWindow(QMainWindow):
         self._log_widget.setVisible(self._vis.get("log", True))
         self.resize(sz)
 
+    # ── 偷懶偵測 ────────────────────────────────────────────────────────────────
+    def _slack_normal_style(self):
+        self._slack_card.setStyleSheet(
+            f"QFrame {{ background:{C['bg2']}; border:1px solid {C['border']};"
+            f" border-radius:10px; }}")
+
+    def _set_slack_status(self, text, color):
+        self._slack_status.setText(text)
+        self._slack_status.setStyleSheet(
+            f"color:{color}; font-size:12px; font-family:Consolas;"
+            f" background:transparent; border:none;")
+
+    def _check_slack(self, exp_int, ts):
+        if not self._slack_enable.isChecked():
+            self._slack_normal_style()
+            self._set_slack_status("未啟用", C["gray"])
+            return
+        now = time.time()
+        # EXP 有變 → 正常成長，歸零
+        if self._slack_last_exp is None or exp_int != self._slack_last_exp:
+            self._slack_last_exp  = exp_int
+            self._slack_t0        = now
+            self._slack_streak    = 1
+            self._slack_triggered = False
+            self._slack_normal_style()
+            self._set_slack_status("✓ 經驗正常成長", C["green"])
+            return
+        # EXP 不變 → 累計
+        self._slack_streak += 1
+        elapsed = now - (self._slack_t0 or now)
+        need_n  = self._slack_count.value()
+        need_s  = self._slack_secs.value()
+        if self._slack_streak >= need_n and elapsed >= need_s:
+            if not self._slack_triggered:
+                self._slack_triggered = True
+                self._fire_slack_warning(ts, elapsed)
+        else:
+            self._set_slack_status(
+                f"EXP 未變：{self._slack_streak} 筆 / {elapsed:.0f}s"
+                f"  (門檻 {need_n} 筆 且 {need_s}s)", C["yellow"])
+
+    def _fire_slack_warning(self, ts, elapsed):
+        self._slack_card.setStyleSheet(
+            f"QFrame {{ background:#3a1414; border:2px solid {C['red']};"
+            f" border-radius:10px; }}")
+        self._set_slack_status(f"⚠ 偷懶警告！EXP 已停滯 {elapsed:.0f}s", C["red"])
+        self._log_colored(
+            f"[{ts}]  😴 ！偷懶警告！ EXP 已 {elapsed:.0f}s 沒有增加", C["red"])
+        self._run_slack_actions(elapsed)
+
+    def _run_slack_actions(self, elapsed):
+        """跳出自訂文字視窗 + 執行使用者指定的觸發腳本（非阻塞）。"""
+        exp = self._slack_last_exp
+        pct = self._prev_pct
+        # 自訂警告文字（支援 {sec} {exp} {pct}；以及字面的反斜線n換行）
+        raw = (self._cfg.get("slack_msg") or "").strip() or "！偷懶警告！EXP 已 {sec} 秒沒有增加"
+        try:
+            msg = raw.format(sec=int(elapsed),
+                             exp=(f"{exp:,}" if exp else "-"),
+                             pct=(f"{pct:.3f}" if pct else "-"))
+        except Exception:
+            msg = raw
+        msg = msg.replace(chr(92) + "n", chr(10))   # 讓使用者可用 \n 換行
+        try:
+            QApplication.alert(self, 3000)           # 閃爍工作列
+        except Exception:
+            pass
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("偷懶警告")
+        box.setText(msg)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.setModal(False)                          # 非阻塞，監控繼續
+        box.show()
+        # 使用者觸發腳本：情境用環境變數傳入，shell=True 讓使用者自由填指令
+        cmd = (self._cfg.get("slack_cmd") or "").strip()
+        if cmd:
+            try:
+                env = os.environ.copy()
+                env["SLACK_SECONDS"] = str(int(elapsed))
+                env["SLACK_EXP"] = str(exp if exp is not None else "")
+                env["SLACK_PCT"] = (f"{pct:.3f}" if pct is not None else "")
+                subprocess.Popen(cmd, shell=True, env=env)
+                self._log_colored(f"   ↳ 已執行觸發腳本：{cmd}", C["gray"])
+            except Exception as e:
+                self._log_colored(f"   ↳ 觸發腳本失敗：{e}", C["red"])
+
+    def _slack_test(self):
+        self._log_colored("[測試]  手動觸發偷懶動作（不影響實際偵測狀態）", C["yellow"])
+        self._run_slack_actions(self._slack_secs.value())
+
     # ── Control ───────────────────────────────────────────────────────────────
     def _start(self):
         if self._thread and self._thread.isRunning(): return
         self._prev_pct        = None
         self._prev_exp_int    = None
+        self._slack_last_exp  = None
+        self._slack_streak    = 0
+        self._slack_t0        = None
+        self._slack_triggered = False
         self._exp_fail_streak = 0
         self._max_exp_est     = None
         self._guard.reset()
@@ -1015,6 +1183,7 @@ class MainWindow(QMainWindow):
                     else:
                         self._max_exp_est = self._max_exp_est * 0.9 + cur_max * 0.1
                 self._update_stats(pct_f)
+                self._check_slack(exp_int, ts)
 
             diff_str = ""
             if self._prev_pct is not None:
