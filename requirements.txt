@@ -1,5 +1,0 @@
-pywin32
-mss
-Pillow
-opencv-python
-easyocr
