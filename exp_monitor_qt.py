@@ -664,6 +664,7 @@ class SettingsPanel(QFrame):
         _vis_map = {
             "stats":     "EXP/s & %/hr",
             "ttl":       "預計升等",
+            "slack":     "偷懶偵測",
             "chart_pct": "EXP% 趨勢圖",
             "chart_eps": "EXP/s 趨勢圖",
             "log":       "紀錄面板",
@@ -950,7 +951,7 @@ class MainWindow(QMainWindow):
         exp_lay.addWidget(self._pct_bar)
 
         raw_row = QHBoxLayout()
-        raw_row.addWidget(_lbl("原始 EXP", "gray", 11))
+        raw_row.addWidget(_lbl("EXP", "gray", 11))
         raw_row.addStretch()
         self._digit_lbl = _lbl(f"位數學習：學習中 0/{LOCK_REQUIRED}", "gray", 11)
         raw_row.addWidget(self._digit_lbl)
@@ -962,7 +963,7 @@ class MainWindow(QMainWindow):
         exp_lay.addWidget(self._exp_lbl)
 
         thresh_row = QHBoxLayout()
-        thresh_row.addWidget(_lbl("動態門檻：", "gray", 11))
+        thresh_row.addWidget(_lbl("升級所需：", "gray", 11))
         self._thresh_lbl = _lbl("—（未建立）", "gray", 11, mono=True)
         thresh_row.addWidget(self._thresh_lbl)
         thresh_row.addStretch()
@@ -1158,6 +1159,7 @@ class MainWindow(QMainWindow):
         sz = self.size()
         self._stats_widget.setVisible(self._vis.get("stats", True))
         self._ttl_widget.setVisible(self._vis.get("ttl", True))
+        self._slack_card.setVisible(self._vis.get("slack", True))
         self._chart_pct_widget.setVisible(self._vis.get("chart_pct", True))
         self._chart_eps_widget.setVisible(self._vis.get("chart_eps", True))
         self._log_widget.setVisible(self._vis.get("log", True))
