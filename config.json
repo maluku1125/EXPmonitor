@@ -8,14 +8,43 @@
     "loweff_enable": false,
     "loweff_threshold": 0,
     "always_on_top": false,
+    "erda_enable": true,
+    "erda_regions": {
+      "氣息": [
+        689,
+        1011,
+        66,
+        12
+      ],
+      "碎片": [
+        773,
+        1011,
+        44,
+        11
+      ],
+      "角標": [
+        714,
+        992,
+        18,
+        18
+      ],
+      "氣息數量": [
+        714,
+        999,
+        17,
+        8
+      ]
+    },
     "theme": "dark",
     "slack_enable": false
   },
   "vis": {
-    "stats": true,
-    "ttl": true,
+    "stats": false,
+    "ttl": false,
     "chart_pct": false,
     "chart_eps": true,
-    "log": true
+    "log": true,
+    "erda": true,
+    "slack": false
   }
 }

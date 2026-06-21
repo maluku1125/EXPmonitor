@@ -13,6 +13,7 @@ echo [2/3] Building EXE...
 pyinstaller --noconfirm --onedir --windowed --name "EXPMonitor" ^
   --add-data "exp_monitor.py;." ^
   --add-data "exp_template_ocr.py;." ^
+  --add-data "erda_ocr.py;." ^
   --add-data "templates;templates" ^
   --hidden-import win32gui --hidden-import win32con --hidden-import win32ui ^
   --hidden-import win32api --hidden-import pywintypes ^
@@ -24,7 +25,10 @@ pyinstaller --noconfirm --onedir --windowed --name "EXPMonitor" ^
   exp_monitor_qt.py
 if errorlevel 1 ( echo Build failed & pause & exit /b 1 )
 
-echo [3/3] Cleaning up...
+echo [3/3] Copying Erda templates next to EXE and cleaning up...
+rem Erda templates live next to the exe (writable; runtime calibration saves here)
+if exist templates_erda xcopy /e /i /y "templates_erda" "dist\EXPMonitor\templates_erda" >nul
+if exist templates_erda_badge xcopy /e /i /y "templates_erda_badge" "dist\EXPMonitor\templates_erda_badge" >nul
 if exist build rmdir /s /q build
 if exist EXPMonitor.spec del /q EXPMonitor.spec
 

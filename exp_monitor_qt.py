@@ -58,6 +58,17 @@ try:
 except Exception:
     _HAS_TEMPLATE = False
 
+# ── Erda 面板辨識模組 ──────────────────────────────────────────────────────────
+try:
+    _espec = importlib.util.spec_from_file_location(
+        "erda_ocr", os.path.join(_HERE, "erda_ocr.py"))
+    erda_ocr = importlib.util.module_from_spec(_espec)
+    _espec.loader.exec_module(erda_ocr)
+    _HAS_ERDA = True
+except Exception:
+    erda_ocr = None
+    _HAS_ERDA = False
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 主題定義
 # ══════════════════════════════════════════════════════════════════════════════
@@ -687,6 +698,7 @@ class SettingsPanel(QFrame):
             "chart_pct": "EXP% 趨勢圖",
             "chart_eps": "EXP/s 趨勢圖",
             "log":       "紀錄面板",
+            "erda":      "Erda 面板",
         }
         vis_grid = QGridLayout()
         vis_grid.setHorizontalSpacing(14)
@@ -896,6 +908,201 @@ class MiniWindow(QWidget):
     def mouseReleaseEvent(self, e):
         self._drag = None
 
+_FCOLOR = {"氣息": "#3aa0ff", "碎片": "#ffb020", "氣息數量": "#ff5070"}
+
+
+class ShotLabel(QLabel):
+    """顯示截圖(可縮放)；拖框選取，座標換算回原圖。"""
+    def __init__(self, on_select):
+        super().__init__()
+        self._on_select = on_select
+        self._scale = 1.0
+        self._boxes = {}
+        self._start = None
+        self._cur = None
+        self.setStyleSheet("background:#000;")
+        self.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+    def render_shot(self, bgr, scale, boxes):
+        self._scale = scale
+        self._boxes = boxes
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        pm = QPixmap.fromImage(QImage(rgb.tobytes(), w, h, 3 * w, QImage.Format_RGB888))
+        pm = pm.scaled(max(1, int(w * scale)), max(1, int(h * scale)))
+        self.setPixmap(pm)
+        self.setFixedSize(pm.size())
+
+    def mousePressEvent(self, e):
+        if self.pixmap() is None:
+            return
+        self._start = e.pos(); self._cur = e.pos(); self.update()
+
+    def mouseMoveEvent(self, e):
+        if self._start is not None:
+            self._cur = e.pos(); self.update()
+
+    def mouseReleaseEvent(self, e):
+        if self._start is None:
+            return
+        from PyQt5.QtCore import QRect
+        r = QRect(self._start, e.pos()).normalized()
+        self._start = self._cur = None
+        s = self._scale
+        orig = (int(r.x() / s), int(r.y() / s), int(r.width() / s), int(r.height() / s))
+        if orig[2] > 3 and orig[3] > 3:
+            self._on_select(orig)
+        self.update()
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        if self.pixmap() is None:
+            return
+        from PyQt5.QtCore import QRect
+        from PyQt5.QtGui import QPen
+        p = QPainter(self); s = self._scale
+        for f, (x, y, w, h) in self._boxes.items():
+            p.setPen(QPen(QColor(_FCOLOR.get(f, "#ffffff")), 2))
+            p.drawRect(int(x * s), int(y * s), int(w * s), int(h * s))
+            p.drawText(int(x * s), int(y * s) - 3, f)
+        if self._start is not None and self._cur is not None:
+            p.setPen(QPen(QColor("#ffff00"), 1, Qt.DashLine))
+            p.drawRect(QRect(self._start, self._cur).normalized())
+        p.end()
+
+
+class ErdaSetupDialog(QDialog):
+    """擷取遊戲畫面 → 放大 → 框選 氣息/碎片/氣息數量（用已存好的模板）→ 試讀 → 儲存。"""
+    def __init__(self, parent, reader, regions, grab_fn):
+        super().__init__(parent)
+        self.setWindowTitle("Erda 面板設定")
+        self.resize(1040, 820)
+        self.setStyleSheet(f"QDialog {{ background:{C['bg']}; }}")
+        self._reader = reader
+        self._ocr = reader.ocr
+        self._badge = reader.badge
+        self._grab = grab_fn
+        self.regions = dict(regions)
+        self._shot = None
+        self._fit = 1.0
+        self._zoom = 1.0
+        self._sel = None
+        lay = QVBoxLayout(self)
+
+        top = QHBoxLayout()
+        for txt, fn in [("① 擷取截圖", self._shoot), ("＋放大", lambda: self._set_zoom(1.5)),
+                        ("－縮小", lambda: self._set_zoom(1 / 1.5)), ("100%", lambda: self._set_zoom(0))]:
+            b = QPushButton(txt); b.clicked.connect(fn); top.addWidget(b)
+        for f in erda_ocr.FIELDS:
+            b = QPushButton(f"框選 {f}"); b.clicked.connect(lambda _, x=f: self._begin(x)); top.addWidget(b)
+        b = QPushButton("② 試讀"); b.clicked.connect(self._read); top.addWidget(b)
+        top.addStretch(); lay.addLayout(top)
+
+        self._hint = QLabel("")
+        self._hint.setStyleSheet(
+            f"color:{C['white']}; font-size:12px; font-weight:600;"
+            f" background:{C['bg_attr']}; border:1px solid {C['border_ui']};"
+            f" border-radius:4px; padding:5px 8px;")
+        self._hint.setWordWrap(True)
+        lay.addWidget(self._hint)
+
+        self._shotlbl = ShotLabel(self._on_select)
+        sca = QScrollArea(); sca.setWidget(self._shotlbl); sca.setWidgetResizable(False)
+        sca.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sca.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # 覆寫全域 QSS（其把水平捲軸高度設為 0），讓放大後可左右捲動
+        sca.setStyleSheet(f"QScrollBar:horizontal{{height:12px;background:{C['bg_attr']};}}"
+                          f"QScrollBar::handle:horizontal{{background:{C['bg3']};border-radius:6px;min-width:24px;}}"
+                          "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{width:0;}"
+                          f"QScrollBar:vertical{{width:12px;background:{C['bg_attr']};}}"
+                          f"QScrollBar::handle:vertical{{background:{C['bg3']};border-radius:6px;min-height:24px;}}")
+        lay.addWidget(sca, 1)
+
+        res = QFrame()
+        res.setStyleSheet(f"background:{C['bg_attr']};border:1px solid {C['border_ui']};border-radius:6px;")
+        rg = QGridLayout(res); self._res = {}
+        for i, f in enumerate(erda_ocr.FIELDS):
+            t = QLabel(f); t.setStyleSheet(f"color:{C['gray']};"); rg.addWidget(t, i, 0)
+            v = QLabel("—"); v.setStyleSheet(f"color:{C['white']};font-size:18px;font-family:Consolas;")
+            self._res[f] = v; rg.addWidget(v, i, 1)
+        lay.addWidget(res)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Save).setText("儲存")
+        bb.button(QDialogButtonBox.Cancel).setText("取消")
+        bb.accepted.connect(self._on_save); bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self._refresh_status()
+
+    def _refresh_status(self):
+        rdy = "模板已載入" if self._ocr.ready() else "模板未載入"
+        bdg = f"氣息數量範本 {len(self._badge.refs)}/21"
+        framed = "、".join(self.regions) or "尚未框選"
+        self._hint.setText(f"狀態：{rdy}；{bdg}；已框：{framed}　|　① 擷取 → ＋放大 → 框選三欄 → ② 試讀 → 儲存")
+
+    def _scale(self):
+        return self._fit * self._zoom
+
+    def _rerender(self):
+        if self._shot is not None:
+            self._shotlbl.render_shot(self._shot, self._scale(), dict(self.regions))
+
+    def _set_zoom(self, factor):
+        if self._shot is None:
+            return
+        self._zoom = 1.0 if factor == 0 else max(0.2, min(8.0, self._zoom * factor))
+        self._rerender()
+
+    def _shoot(self):
+        bgr = self._grab()
+        if bgr is None:
+            self._hint.setText("找不到 MapleStory 視窗，請先開遊戲"); return
+        self._shot = bgr
+        self._fit = min(1.0, 980 / bgr.shape[1]); self._zoom = 1.0
+        self._rerender()
+        self._hint.setText(f"已擷取 {bgr.shape[1]}x{bgr.shape[0]}。＋放大再框選。")
+
+    def _begin(self, f):
+        if self._shot is None:
+            self._hint.setText("請先擷取截圖"); return
+        self._sel = f
+        self._hint.setText(f"在截圖上拖一個緊貼數字的框（{f}）")
+
+    def _on_select(self, box):
+        if self._sel is None:
+            self._hint.setText("請先按「框選 …」"); return
+        self.regions[self._sel] = box
+        f = self._sel; self._sel = None
+        self._rerender()
+        self._hint.setText(f"已框 {f}={box}")
+
+    def _read(self):
+        if self._shot is None:
+            self._hint.setText("請先擷取"); return
+        for f in erda_ocr.FIELDS:
+            if f not in self.regions:
+                self._res[f].setText("（未框）"); continue
+            x, y, w, h = self.regions[f]
+            crop = self._shot[y:y + h, x:x + w]
+            if f == "氣息數量":
+                bval, bsc = self._badge.read(crop)
+                self._res[f].setText(f"{bval}  (比對 {bsc:.2f})" if bval is not None else "（氣息數量範本未建）")
+            elif f == "氣息":
+                bv = erda_ocr.parse_breath(self._ocr.read(crop, f))
+                self._res[f].setText((f"{bv} / 1000") if bv is not None else "—")
+            else:
+                self._res[f].setText(self._ocr.read(crop, f) or "—")
+        self._refresh_status()
+
+    def _on_save(self):
+        miss = [f for f in erda_ocr.FIELDS if f not in self.regions]
+        if miss:
+            QMessageBox.warning(self, "Erda 設定", "尚未框選：" + "、".join(miss)); return
+        if not self._ocr.ready():
+            QMessageBox.warning(self, "Erda 設定", "辨識模板未載入（templates_erda 缺少數字檔）。"); return
+        self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -908,9 +1115,11 @@ class MainWindow(QMainWindow):
 
         self._cfg: dict = {"interval": 1, "threshold": 1.0, "chart_max": 28800,
                            "slack_msg": "！偷懶警告！EXP 已 {sec} 秒沒有增加", "slack_cmd": "",
-                           "loweff_enable": False, "loweff_threshold": 0, "always_on_top": False}
+                           "loweff_enable": False, "loweff_threshold": 0, "always_on_top": False,
+                           "erda_enable": False, "erda_regions": {}}
         self._vis: dict = {"stats": True, "ttl": True,
-                           "chart_pct": True, "chart_eps": True, "log": True}
+                           "chart_pct": True, "chart_eps": True, "log": True,
+                           "erda": False}
         self._load_config()   # 套用上次存檔的設定（在建立 UI 前）
         self._thread: QThread | None = None
         self._worker: MonitorWorker | None = None
@@ -934,6 +1143,7 @@ class MainWindow(QMainWindow):
         self._sess_levels = 0
         self._sess_gain_val = 0.0
         self._mini = None
+        self._erda = erda_ocr.ErdaReader() if _HAS_ERDA else None
 
         # 套用儲存的主題（在 _load_config 之後）
         _saved_theme = self._cfg.get("theme", "maplestory")
@@ -1191,6 +1401,35 @@ class MainWindow(QMainWindow):
         slack_lay.addWidget(self._slack_status)
         self._body_lay.addWidget(self._slack_card)
 
+        # ─── Erda 面板 card ───────────────────────────────────────────────
+        self._erda_card, erda_lay = _card(16, 14)
+        self._erda_card.setStyleSheet(
+            f"QFrame {{ background:{C['bg_attr']}; border:1px solid {C['border_ui']};"
+            f" border-radius:6px; }}")
+        eh = QHBoxLayout()
+        eh.addWidget(_lbl("🔮  Erda 面板", "white", 13, bold=True))
+        eh.addStretch()
+        self._erda_enable = QCheckBox("啟用")
+        self._erda_enable.setChecked(bool(self._cfg.get("erda_enable", False)))
+        self._erda_enable.toggled.connect(self._on_erda_enable)
+        eh.addWidget(self._erda_enable)
+        _eb = QPushButton("設定…"); _eb.setFixedWidth(76)
+        _eb.setToolTip("擷取遊戲畫面 → 框選 氣息/碎片/氣息數量 → 校準")
+        _eb.clicked.connect(self._erda_setup)
+        eh.addWidget(_eb)
+        erda_lay.addLayout(eh)
+
+        erow = QHBoxLayout(); erow.setSpacing(18)
+        self._erda_breath = _lbl("氣息 —", "cyan", 16, mono=True, bold=True)
+        self._erda_shred  = _lbl("碎片 —", "yellow", 16, mono=True, bold=True)
+        self._erda_badge  = _lbl("氣息數量 —", "purple", 16, mono=True, bold=True)
+        erow.addWidget(self._erda_breath)
+        erow.addWidget(self._erda_shred)
+        erow.addWidget(self._erda_badge)
+        erow.addStretch()
+        erda_lay.addLayout(erow)
+        self._body_lay.addWidget(self._erda_card)
+
         # ─── Chart ────────────────────────────────────────────────────────
         ax_pen = pg.mkPen(C["chart_text"])
 
@@ -1331,6 +1570,7 @@ class MainWindow(QMainWindow):
         self._slack_card.setVisible(self._vis.get("slack", True))
         self._chart_pct_widget.setVisible(self._vis.get("chart_pct", True))
         self._chart_eps_widget.setVisible(self._vis.get("chart_eps", True))
+        self._erda_card.setVisible(self._vis.get("erda", False))
         self._log_widget.setVisible(self._vis.get("log", True))
         self.resize(sz)
 
@@ -1484,6 +1724,75 @@ class MainWindow(QMainWindow):
                 self._worker._ocr = TemplateOCR()   # 會優先載入使用者模板
         except Exception:
             pass
+
+    # ── Erda 面板 ───────────────────────────────────────────────────────────
+    def _grab_client_full(self):
+        """抓整個 MapleStory client 畫面（BGR）；找不到視窗回 None。"""
+        hwnd, reg = find_window()
+        if hwnd is None:
+            return None
+        try:
+            import mss
+            with mss.mss() as sct:
+                raw = sct.grab({"left": reg["left"], "top": reg["top"],
+                                "width": reg["width"], "height": reg["height"]})
+                return cv2.cvtColor(np.array(raw, dtype=np.uint8), cv2.COLOR_BGRA2BGR)
+        except Exception:
+            return None
+
+    def _on_erda_enable(self, on):
+        self._cfg["erda_enable"] = bool(on)
+        if not on:
+            self._erda_set_alert(False)
+
+    def _refresh_erda(self):
+        if not _HAS_ERDA or self._erda is None:
+            return
+        if not self._cfg.get("erda_enable", False) or not self._vis.get("erda", False):
+            return
+        regions = self._cfg.get("erda_regions") or {}
+        if not self._erda.configured(regions):
+            return
+        img = self._grab_client_full()
+        if img is None:
+            return
+        try:
+            d = self._erda.read(img, regions)
+        except Exception:
+            return
+        b, sd, bd = d.get("breath"), d.get("shred"), d.get("badge")
+        self._erda_breath.setText(f"氣息 {b} / 1000" if b is not None else "氣息 —")
+        self._erda_shred.setText(f"碎片 {sd:,}" if sd is not None else "碎片 —")
+        self._erda_badge.setText(f"氣息數量 {bd}" if bd is not None else "氣息數量 —")
+        # 氣息數量滿 20 → 區塊變紅警示（類似偷懶警告）
+        self._erda_set_alert(bd is not None and bd >= 20)
+
+    def _erda_normal_ss(self):
+        return (f"QFrame {{ background:{C['bg_attr']}; border:1px solid {C['border_ui']};"
+                f" border-radius:6px; }}")
+
+    def _erda_set_alert(self, on):
+        if getattr(self, "_erda_alert_on", None) == on:
+            return
+        self._erda_alert_on = on
+        if on:
+            self._erda_card.setStyleSheet(
+                f"QFrame {{ background:{C['red']}; border:2px solid #ffffff;"
+                f" border-radius:6px; }}")
+        else:
+            self._erda_card.setStyleSheet(self._erda_normal_ss())
+
+    def _erda_setup(self):
+        if not _HAS_ERDA or self._erda is None:
+            QMessageBox.warning(self, "Erda 設定", "辨識模組未載入，無法設定。"); return
+        dlg = ErdaSetupDialog(self, self._erda,
+                              self._cfg.get("erda_regions") or {},
+                              self._grab_client_full)
+        if dlg.exec_() == QDialog.Accepted:
+            self._cfg["erda_regions"] = dlg.regions
+            self._erda.reload()
+            self._log_info("Erda 設定完成：已框 " + "、".join(dlg.regions))
+            self._on_erda_enable(self._erda_enable.isChecked())
 
     # ── 偷懶偵測 ────────────────────────────────────────────────────────────────
     def _render_alerts(self):
@@ -1896,6 +2205,7 @@ class MainWindow(QMainWindow):
         if len(exs) >= 2:
             self._curve_eps.setData(exs, eys)
         self._update_mini()
+        self._refresh_erda()
 
     # ── Status / Log ──────────────────────────────────────────────────────────
     def _set_status(self, text: str, color: str):
@@ -1971,6 +2281,8 @@ class MainWindow(QMainWindow):
         _attr_ss = (f"QFrame {{ background:{C['bg_attr']}; border:1px solid {C['border_ui']};"
                     f" border-radius:6px; }}")
         self._slack_card.setStyleSheet(_attr_ss)
+        self._erda_card.setStyleSheet(_attr_ss)
+        self._erda_alert_on = False
         self._chart_pct_widget.setStyleSheet(_attr_ss)
         self._chart_eps_widget.setStyleSheet(_attr_ss)
 
